@@ -131,8 +131,10 @@ def load_json(path):
 
 
 sea_ice = load_csv(PATHS["sea_ice"])
-iceberg_risk = load_csv(PATHS["iceberg_risk"])
-iceberg_trajectory = load_csv(PATHS["iceberg_trajectory"])
+"iceberg_risk": os.path.join(BASE_DIR, "iceberg_risk_layer.csv"),
+"iceberg_trajectory": os.path.join(
+    BASE_DIR, "iceberg_trajectory_predictions.csv"
+),
 combined = load_csv(PATHS["combined"])
 
 shortest_route = load_csv(PATHS["shortest"])
