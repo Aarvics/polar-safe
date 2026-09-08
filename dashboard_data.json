@@ -1,0 +1,44 @@
+{
+  "project": {
+    "name": "POLAR-SAFE",
+    "title": "AI-Enabled Antarctic Navigation Decision Support System",
+    "date": "2025-04-16"
+  },
+  "risk_summary": {
+    "mean_combined_risk": 11.68,
+    "maximum_combined_risk": 95.37,
+    "risk_distribution": {
+      "Low": 11886,
+      "High": 2112,
+      "Moderate": 683,
+      "Very High": 187
+    }
+  },
+  "iceberg_summary": {
+    "predictions": 5341,
+    "unique_icebergs": 22,
+    "mean_risk": 22.44
+  },
+  "routes": {
+    "shortest": {
+      "distance_km": 2925.8,
+      "mean_risk": 59.83,
+      "max_risk": 68.32
+    },
+    "balanced": {
+      "distance_km": 3709.42,
+      "mean_risk": 28.36,
+      "max_risk": 68.32
+    },
+    "risk_aware": {
+      "distance_km": 5050.46,
+      "mean_risk": 13.56,
+      "max_risk": 68.97
+    }
+  },
+  "decision": {
+    "recommended_route": "Risk-Aware",
+    "risk_reduction_vs_shortest_percent": 77.33,
+    "distance_increase_percent": 72.62
+  }
+}
