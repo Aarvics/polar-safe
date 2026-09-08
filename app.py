@@ -92,7 +92,7 @@ PATHS = {
     "comparison": os.path.join(BASE_DIR, "route_comparison.csv"),
     "dashboard": os.path.join(BASE_DIR, "dashboard_data.json"),
 }
-
+}
 
 # ============================================================
 # DATA LOADING
