@@ -82,35 +82,17 @@ st.markdown(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 PATHS = {
-    "sea_ice": os.path.join(
-        BASE_DIR, "antarctic_sea_ice_risk_2025-04-16.csv"
-    ),
-    "iceberg_risk": os.path.join(
-        BASE_DIR, "iceberg_risk_layer.csv"
-    ),
-    "iceberg_trajectory": os.path.join(
-        BASE_DIR, "iceberg_trajectory_predictions.csv"
-    ),
-    "combined": os.path.join(
-        BASE_DIR, "antarctic_combined_navigation_risk_2025-04-16.csv"
-    ),
-    "shortest": os.path.join(
-        BASE_DIR, "shortest_route.csv"
-    ),
-    "balanced": os.path.join(
-        BASE_DIR, "balanced_route.csv"
-    ),
-    "risk_aware": os.path.join(
-        BASE_DIR, "risk_aware_route.csv"
-    ),
-    "comparison": os.path.join(
-        BASE_DIR, "route_comparison.csv"
-    ),
-    "dashboard": os.path.join(
-        BASE_DIR, "dashboard_data.json"
-    ),
+    "sea_ice": os.path.join(BASE_DIR, "antarctic_sea_ice_risk_2025-04-16.csv"),
+    "iceberg_risk": os.path.join(BASE_DIR, "iceberg_risk_layer.csv"),
+    "iceberg_trajectory": os.path.join(BASE_DIR, "iceberg_trajectory_predictions.csv"),
+    "combined": os.path.join(BASE_DIR, "antarctic_combined_navigation_risk_2025-04-16.csv"),
+    "shortest": os.path.join(BASE_DIR, "shortest_route.csv"),
+    "balanced": os.path.join(BASE_DIR, "balanced_route.csv"),
+    "risk_aware": os.path.join(BASE_DIR, "risk_aware_route.csv"),
+    "comparison": os.path.join(BASE_DIR, "route_comparison.csv"),
+    "dashboard": os.path.join(BASE_DIR, "dashboard_data.json"),
 }
-}
+
 
 # ============================================================
 # DATA LOADING
