@@ -82,17 +82,29 @@ st.markdown(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 PATHS = {
-    "sea_ice": os.path.join(BASE_DIR, "antarctic_sea_ice_risk_2025-04-16.csv"),
-    "iceberg_risk": os.path.join(BASE_DIR, "iceberg_risk_layer.csv"),
-    "iceberg_trajectory": os.path.join(BASE_DIR, "iceberg_trajectory_predictions.csv"),
-    "combined": os.path.join(BASE_DIR, "antarctic_combined_navigation_risk_2025-04-16.csv"),
-    "shortest": os.path.join(BASE_DIR, "shortest_route.csv"),
-    "balanced": os.path.join(BASE_DIR, "balanced_route.csv"),
-    "risk_aware": os.path.join(BASE_DIR, "risk_aware_route.csv"),
-    "comparison": os.path.join(BASE_DIR, "route_comparison.csv"),
-    "dashboard": os.path.join(BASE_DIR, "dashboard_data.json"),
+    "sea_ice": os.path.join(
+        BASE_DIR, "sea_ice", "antarctic_sea_ice_risk_2025-04-16.csv"
+    ),
+    "iceberg_risk": os.path.join(
+        BASE_DIR, "iceberg", "iceberg_risk_layer.csv"
+    ),
+    "iceberg_trajectory": os.path.join(
+        BASE_DIR, "iceberg", "iceberg_trajectory_predictions.csv"
+    ),
+    "combined": os.path.join(
+        BASE_DIR, "combined",
+        "antarctic_combined_navigation_risk_2025-04-16.csv"
+    ),
+    "shortest": os.path.join(BASE_DIR, "routes", "shortest_route.csv"),
+    "balanced": os.path.join(BASE_DIR, "routes", "balanced_route.csv"),
+    "risk_aware": os.path.join(BASE_DIR, "routes", "risk_aware_route.csv"),
+    "comparison": os.path.join(BASE_DIR, "routes", "route_comparison.csv"),
+    "dashboard": os.path.join(
+        BASE_DIR, "dashboard", "dashboard_data.json"
+    ),
+"bathymetry": os.path.join(BASE_DIR, "bathymetry", "bathymetry_depth_256.npy"),
+"land_mask": os.path.join(BASE_DIR, "bathymetry", "land_mask_256.npy"),
 }
-
 
 # ============================================================
 # DATA LOADING
@@ -124,6 +136,8 @@ sea_ice = load_csv(PATHS["sea_ice"])
 iceberg_risk = load_csv(PATHS["iceberg_risk"])
 iceberg_trajectory = load_csv(PATHS["iceberg_trajectory"])
 combined = load_csv(PATHS["combined"])
+bathymetry = np.load(PATHS["bathymetry"])
+land_mask = np.load(PATHS["land_mask"])
 
 shortest_route = load_csv(PATHS["shortest"])
 balanced_route = load_csv(PATHS["balanced"])
@@ -302,6 +316,353 @@ def create_risk_map(df, risk_col, title, marker_size=6):
 
     return fig
 
+def nearest_grid_cell(lat, lon, lat_min, lat_max, lon_min, lon_max, shape):
+    rows, cols = shape
+
+    row = int(round(
+        (lat_max - lat) / (lat_max - lat_min) * (rows - 1)
+    ))
+
+    col = int(round(
+        (lon - lon_min) / (lon_max - lon_min) * (cols - 1)
+    ))
+
+    row = max(0, min(rows - 1, row))
+    col = max(0, min(cols - 1, col))
+
+    return row, col
+
+
+def astar_navigation(cost_grid, start, goal):
+    import heapq
+    import math
+
+    rows, cols = cost_grid.shape
+
+    if not np.isfinite(cost_grid[start]):
+        return []
+
+    if not np.isfinite(cost_grid[goal]):
+        return []
+
+    neighbors = [
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    ]
+
+    def heuristic(a, b):
+        return math.hypot(
+            a[0] - b[0],
+            a[1] - b[1],
+        )
+
+    open_set = []
+
+    heapq.heappush(
+        open_set,
+        (heuristic(start, goal), start)
+    )
+
+    came_from = {}
+    g_score = {start: 0.0}
+
+    while open_set:
+        _, current = heapq.heappop(open_set)
+
+        if current == goal:
+            path = [current]
+
+            while current in came_from:
+                current = came_from[current]
+                path.append(current)
+
+            path.reverse()
+            return path
+
+        for dr, dc in neighbors:
+            nr = current[0] + dr
+            nc = current[1] + dc
+
+            if nr < 0 or nr >= rows:
+                continue
+
+            if nc < 0 or nc >= cols:
+                continue
+
+            if not np.isfinite(cost_grid[nr, nc]):
+                continue
+
+            step_distance = math.sqrt(
+                2 if dr != 0 and dc != 0 else 1
+            )
+
+            tentative_g = (
+                g_score[current]
+                + step_distance * cost_grid[nr, nc]
+            )
+
+            neighbor = (nr, nc)
+
+            if tentative_g < g_score.get(neighbor, float("inf")):
+                came_from[neighbor] = current
+                g_score[neighbor] = tentative_g
+
+                f_score = (
+                    tentative_g
+                    + heuristic(neighbor, goal)
+                )
+
+                heapq.heappush(
+                    open_set,
+                    (f_score, neighbor)
+                )
+
+    return []
+def build_navigation_cost_grid(combined_df, bathymetry_array, safety_preference):
+    """
+    Build an A* cost grid using environmental risk and bathymetry.
+
+    Higher environmental risk and shallow water produce higher travel cost.
+    Cells blocked by the land/shallow mask are treated as impassable.
+    """
+
+    rows, cols = bathymetry_array.shape
+
+    # Resize environmental risk to the routing grid
+    risk_grid = np.zeros((rows, cols), dtype=np.float32)
+
+    if not combined_df.empty:
+        risk_col = first_existing_column(
+            combined_df,
+            [
+                "combined_risk_score",
+                "combined_navigation_risk_score",
+                "combined_risk",
+            ],
+        )
+
+        if risk_col and {
+            "latitude",
+            "longitude",
+        }.issubset(combined_df.columns):
+
+            lat_values = pd.to_numeric(
+                combined_df["latitude"],
+                errors="coerce",
+            )
+
+            lon_values = pd.to_numeric(
+                combined_df["longitude"],
+                errors="coerce",
+            )
+
+            risk_values = pd.to_numeric(
+                combined_df[risk_col],
+                errors="coerce",
+            )
+
+            valid = (
+                lat_values.notna()
+                & lon_values.notna()
+                & risk_values.notna()
+            )
+
+            lat_values = lat_values[valid].to_numpy()
+            lon_values = lon_values[valid].to_numpy()
+            risk_values = risk_values[valid].to_numpy()
+
+            if len(risk_values) > 0:
+                lat_min = lat_values.min()
+                lat_max = lat_values.max()
+                lon_min = lon_values.min()
+                lon_max = lon_values.max()
+
+                lat_idx = (
+                    (lat_max - lat_values)
+                    / max(lat_max - lat_min, 1e-9)
+                    * (rows - 1)
+                ).astype(int)
+
+                lon_idx = (
+                    (lon_values - lon_min)
+                    / max(lon_max - lon_min, 1e-9)
+                    * (cols - 1)
+                ).astype(int)
+
+                lat_idx = np.clip(lat_idx, 0, rows - 1)
+                lon_idx = np.clip(lon_idx, 0, cols - 1)
+
+                risk_grid[lat_idx, lon_idx] = risk_values
+
+    # Normalize environmental risk
+    risk_grid = np.clip(risk_grid, 0, 100)
+
+    # Convert safety preference into a routing penalty.
+    # 0% = distance-focused
+    # 100% = strongly risk-focused
+    risk_weight = safety_preference / 100.0
+
+    environmental_cost = (
+        1.0
+        + risk_weight * (risk_grid / 100.0) * 10.0
+    )
+
+    # Bathymetry penalty.
+    # Deeper water has lower penalty.
+    depth = np.asarray(bathymetry_array, dtype=np.float32)
+
+    depth_penalty = np.clip(
+        (depth + 1000.0) / 1000.0,
+        0.0,
+        5.0,
+    )
+
+    cost_grid = environmental_cost + depth_penalty
+
+    # Land / shallow cells are impassable.
+    cost_grid[land_mask == 1.0] = np.inf
+
+    return cost_grid
+def calculate_dynamic_route(
+    origin_coords,
+    destination_coords,
+    safety_preference,
+):
+    """
+    Calculate a dynamic A* route using the available
+    Weddell Sea bathymetry grid.
+    """
+
+    LAT_MIN = -75.0
+    LAT_MAX = -60.0
+    LON_MIN = -60.0
+    LON_MAX = -20.0
+
+    origin_lat, origin_lon = origin_coords
+    destination_lat, destination_lon = destination_coords
+
+    # Check whether the selected locations are inside
+    # the geographic coverage of the bathymetry grid.
+    for lat, lon, label in [
+        (origin_lat, origin_lon, "Origin"),
+        (destination_lat, destination_lon, "Destination"),
+    ]:
+        if not (
+            LAT_MIN <= lat <= LAT_MAX
+            and LON_MIN <= lon <= LON_MAX
+        ):
+            return [], (
+                f"{label} is outside the available "
+                "bathymetry coverage "
+                f"({LAT_MIN} to {LAT_MAX} latitude, "
+                f"{LON_MIN} to {LON_MAX} longitude)."
+            )
+
+    cost_grid = build_navigation_cost_grid(
+        combined,
+        bathymetry,
+        safety_preference,
+    )
+
+    start = nearest_grid_cell(
+        origin_lat,
+        origin_lon,
+        LAT_MIN,
+        LAT_MAX,
+        LON_MIN,
+        LON_MAX,
+        cost_grid.shape,
+    )
+
+    goal = nearest_grid_cell(
+        destination_lat,
+        destination_lon,
+        LAT_MIN,
+        LAT_MAX,
+        LON_MIN,
+        LON_MAX,
+        cost_grid.shape,
+    )
+
+    # Find the nearest navigable cells if the selected
+    # coordinates fall directly on blocked cells.
+    def nearest_navigable(cell):
+        r0, c0 = cell
+
+        if np.isfinite(cost_grid[r0, c0]):
+            return cell
+
+        best = None
+        best_distance = float("inf")
+
+        for radius in range(1, 20):
+            for dr in range(-radius, radius + 1):
+                for dc in range(-radius, radius + 1):
+
+                    r = r0 + dr
+                    c = c0 + dc
+
+                    if r < 0 or r >= cost_grid.shape[0]:
+                        continue
+
+                    if c < 0 or c >= cost_grid.shape[1]:
+                        continue
+
+                    if not np.isfinite(cost_grid[r, c]):
+                        continue
+
+                    distance = dr * dr + dc * dc
+
+                    if distance < best_distance:
+                        best_distance = distance
+                        best = (r, c)
+
+            if best is not None:
+                return best
+
+        return None
+
+    start = nearest_navigable(start)
+    goal = nearest_navigable(goal)
+
+    if start is None or goal is None:
+        return [], "Could not find navigable start/end cells."
+
+    path = astar_navigation(
+        cost_grid,
+        start,
+        goal,
+    )
+
+    if not path:
+        return [], "No navigable A* route was found."
+
+    # Convert grid cells back to geographic coordinates.
+    route = []
+
+    rows, cols = cost_grid.shape
+
+    for row, col in path:
+
+        lat = LAT_MAX - (
+            row / max(rows - 1, 1)
+            * (LAT_MAX - LAT_MIN)
+        )
+
+        lon = LON_MIN + (
+            col / max(cols - 1, 1)
+            * (LON_MAX - LON_MIN)
+        )
+
+        route.append(
+            {
+                "latitude": lat,
+                "longitude": lon,
+            }
+        )
+
+    return pd.DataFrame(route), None
 
 def add_route_trace(fig, df, name, width):
     if df.empty:
@@ -327,32 +688,34 @@ def add_route_trace(fig, df, name, width):
     )
 
 
-def create_route_map():
+def create_route_map(origin_coords, destination_coords, origin_name, destination_name):
     fig = go.Figure()
 
     add_route_trace(fig, shortest_route, "Shortest Route", 3)
     add_route_trace(fig, balanced_route, "Balanced Route", 4)
     add_route_trace(fig, risk_aware_route, "Risk-Aware Route", 5)
 
+    # Dynamic origin marker
     fig.add_trace(
         go.Scattergeo(
-            lon=[76.19525],
-            lat=[-69.4068],
+            lon=[origin_coords[1]],
+            lat=[origin_coords[0]],
             mode="markers+text",
             marker=dict(size=12, symbol="star"),
-            text=["Bharati"],
+            text=[origin_name],
             textposition="top center",
             name="Origin",
         )
     )
 
+    # Dynamic destination marker
     fig.add_trace(
         go.Scattergeo(
-            lon=[11.73333],
-            lat=[-70.76444],
+            lon=[destination_coords[1]],
+            lat=[destination_coords[0]],
             mode="markers+text",
             marker=dict(size=12, symbol="diamond"),
-            text=["Maitri"],
+            text=[destination_name],
             textposition="top center",
             name="Destination",
         )
@@ -361,7 +724,7 @@ def create_route_map():
     fig.update_geos(**polar_geo_settings())
 
     fig.update_layout(
-        title="Bharati → Maitri Route Comparison",
+        title=f"{origin_name} → {destination_name} Route Comparison",
         height=650,
         margin=dict(l=0, r=0, t=55, b=0),
         paper_bgcolor="#07111f",
@@ -370,7 +733,6 @@ def create_route_map():
     )
 
     return fig
-
 
 # ============================================================
 # HEADER
@@ -409,15 +771,76 @@ st.markdown(
 
 st.sidebar.title("🧭 Navigation Controls")
 
+origin_options = {
+    "Bharati Station": (-69.4068, 76.19525),
+    "Maitri Station": (-70.76444, 11.73333),
+    "Custom Location": None,
+}
+
 origin = st.sidebar.selectbox(
     "Origin",
-    ["Bharati Station"],
+    list(origin_options.keys()),
 )
+
+destination_options = {
+    "Maitri Station": (-70.76444, 11.73333),
+    "Bharati Station": (-69.4068, 76.19525),
+    "Custom Location": None,
+}
 
 destination = st.sidebar.selectbox(
     "Destination",
-    ["Maitri Station"],
+    list(destination_options.keys()),
 )
+
+# Custom origin coordinates
+if origin == "Custom Location":
+    st.sidebar.markdown("### Custom Origin")
+
+    origin_lat = st.sidebar.number_input(
+        "Origin Latitude",
+        min_value=-90.0,
+        max_value=90.0,
+        value=-70.0,
+        step=0.1,
+    )
+
+    origin_lon = st.sidebar.number_input(
+        "Origin Longitude",
+        min_value=-180.0,
+        max_value=180.0,
+        value=30.0,
+        step=0.1,
+    )
+
+    origin_coords = (origin_lat, origin_lon)
+else:
+    origin_coords = origin_options[origin]
+
+
+# Custom destination coordinates
+if destination == "Custom Location":
+    st.sidebar.markdown("### Custom Destination")
+
+    destination_lat = st.sidebar.number_input(
+        "Destination Latitude",
+        min_value=-90.0,
+        max_value=90.0,
+        value=-70.0,
+        step=0.1,
+    )
+
+    destination_lon = st.sidebar.number_input(
+        "Destination Longitude",
+        min_value=-180.0,
+        max_value=180.0,
+        value=20.0,
+        step=0.1,
+    )
+
+    destination_coords = (destination_lat, destination_lon)
+else:
+    destination_coords = destination_options[destination]
 
 layer = st.sidebar.radio(
     "Intelligence Layer",
@@ -730,8 +1153,80 @@ elif layer == "Routes":
         f"Prototype voyage scenario: **{origin} → {destination}**"
     )
 
+    # Calculate dynamic route
+dynamic_route, route_error = calculate_dynamic_route(
+    origin_coords,
+    destination_coords,
+    safety_preference,
+)
+
+if route_error:
+    st.warning(route_error)
+
+    # Fall back to the stored routes for locations
+    # outside the current bathymetry coverage.
     st.plotly_chart(
-        create_route_map(),
+        create_route_map(
+            origin_coords,
+            destination_coords,
+            origin,
+            destination,
+        ),
+        width="stretch",
+    )
+
+else:
+    st.success(
+        f"Dynamic A* route generated for "
+        f"{origin} → {destination}"
+    )
+
+    fig = go.Figure()
+
+    add_route_trace(
+        fig,
+        dynamic_route,
+        "Dynamic A* Route",
+        5,
+    )
+
+    fig.add_trace(
+        go.Scattergeo(
+            lon=[origin_coords[1]],
+            lat=[origin_coords[0]],
+            mode="markers+text",
+            marker=dict(size=12, symbol="star"),
+            text=[origin],
+            textposition="top center",
+            name="Origin",
+        )
+    )
+
+    fig.add_trace(
+        go.Scattergeo(
+            lon=[destination_coords[1]],
+            lat=[destination_coords[0]],
+            mode="markers+text",
+            marker=dict(size=12, symbol="diamond"),
+            text=[destination],
+            textposition="top center",
+            name="Destination",
+        )
+    )
+
+    fig.update_geos(**polar_geo_settings())
+
+    fig.update_layout(
+        title=f"Dynamic A* Route: {origin} → {destination}",
+        height=650,
+        margin=dict(l=0, r=0, t=55, b=0),
+        paper_bgcolor="#07111f",
+        font=dict(color="white"),
+        legend=dict(bgcolor="rgba(0,0,0,0.35)"),
+    )
+
+    st.plotly_chart(
+        fig,
         width="stretch",
     )
 
